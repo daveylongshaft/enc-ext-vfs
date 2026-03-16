@@ -151,10 +151,13 @@ class VirtualFileSystem:
         if not header:
             raise FileNotFoundError(f"File not found to delete: {path}")
 
-        for block_address in header.block_addresses:
-            self._block_store.delete_block(block_address)
-        
+        header_address = self._fat.lookup(path)
         self._fat.remove(path)
+
+        # Only free blocks if no other FAT entry references this header (hard links)
+        if not any(addr == header_address for addr in self._fat._fat.values()):
+            for block_address in header.block_addresses:
+                self._block_store.delete_block(block_address)
 
     def rename(self, old_path: str, new_path: str) -> None:
         """Rename/move file (updates FAT, not block addresses)."""
