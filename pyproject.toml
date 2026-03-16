@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "enc-ext-vfs"
+version = "0.0.1"
+description = "Encrypted FUSE Virtual Filesystem"
+requires-python = ">=3.8"
+dependencies = [
+    "cryptography",
+    "fusepy",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
