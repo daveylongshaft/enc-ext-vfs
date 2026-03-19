@@ -89,7 +89,7 @@ class EncExtVfsFuse(fuse.Operations):
         new_data = current_data[:offset] + data + current_data[offset + len(data):]
         header = self.vfs.stat(path)
         
-        self.vfs.write(path, new_data, key_hash=header.key_hash if header else None)
+        self.vfs.write(path, new_data, requester=self.requester, key_hash=header.key_hash if header else None)
         return len(data)
 
     def truncate(self, path, length, fh=None):
@@ -98,15 +98,15 @@ class EncExtVfsFuse(fuse.Operations):
         truncated_data = data[:length]
         
         header = self.vfs.stat(path)
-        self.vfs.write(path, truncated_data, key_hash=header.key_hash if header else None)
+        self.vfs.write(path, truncated_data, requester=self.requester, key_hash=header.key_hash if header else None)
 
     def unlink(self, path):
         """Delete a file."""
-        self.vfs.delete(path)
+        self.vfs.delete(path, requester=self.requester)
 
     def rename(self, old, new):
         """Rename a file."""
-        self.vfs.rename(old, new)
+        self.vfs.rename(old, new, requester=self.requester)
         
     def symlink(self, target, source):
         """Create a symbolic link."""

@@ -127,48 +127,57 @@ class VirtualFileSystem:
         
         return plaintext_data
 
-    def write(self, path: str, data: bytes, key_hash: str = None) -> FileHeader:
+    def write(self, path: str, data: bytes, requester: str = "root", key_hash: str = None) -> FileHeader:
         """Overwrite file contents (replace)."""
         if self.exists(path):
-            self.delete(path)
+            self.delete(path, requester)
         return self.create(path, data, key_hash=key_hash)
 
-    def append(self, path: str, data: bytes) -> FileHeader:
+    def append(self, path: str, data: bytes, requester: str = "root") -> FileHeader:
         """Append data to existing file."""
         # Simple implementation: read, append in memory, write back.
         try:
-            current_data = self.read(path, "root") # Use a privileged user for internal ops
+            current_data = self.read(path, requester)
             header = self._read_header(path)
             new_data = current_data + data
-            return self.write(path, new_data, key_hash=header.key_hash)
+            return self.write(path, new_data, requester, key_hash=header.key_hash)
         except FileNotFoundError:
             # If file doesn't exist, append is the same as create.
             return self.create(path, data)
 
-    def delete(self, path: str) -> None:
+    def delete(self, path: str, requester: str = "root") -> None:
         """Delete file and free its blocks."""
         header = self._read_header(path)
         if not header:
             raise FileNotFoundError(f"File not found to delete: {path}")
 
-        for block_address in header.block_addresses:
-            self._block_store.delete_block(block_address)
-        
+        # Enforce ACL: must be able to read to delete (as a simple permission model)
+        self._key_manager.get_key_for_read(header.key_hash, requester)
+
+        header_address = self._fat.lookup(path)
         self._fat.remove(path)
 
-    def rename(self, old_path: str, new_path: str) -> None:
+        # Check if any other file points to this header address (hard link)
+        if not any(addr == header_address for addr in self._fat._fat.values()):
+            for block_address in header.block_addresses:
+                self._block_store.delete_block(block_address)
+
+    def rename(self, old_path: str, new_path: str, requester: str = "root") -> None:
         """Rename/move file (updates FAT, not block addresses)."""
         if not self.exists(old_path):
             raise FileNotFoundError(f"Source file not found for rename: {old_path}")
         if self.exists(new_path):
             raise FileExistsError(f"Destination file already exists: {new_path}")
 
+        header = self._read_header(old_path)
+        # Enforce ACL
+        self._key_manager.get_key_for_read(header.key_hash, requester)
+
         header_address = self._fat.lookup(old_path)
         self._fat.remove(old_path)
         self._fat.register_file(new_path, header_address)
         
         # Also update the filename inside the header
-        header = self._read_header(new_path)
         if header:
             header.filename = new_path
             header_json = header.to_json().encode('utf-8')
@@ -177,24 +186,28 @@ class VirtualFileSystem:
             self._block_store.write_block(header.block_addresses[0], encrypted_header)
 
 
-    def copy(self, src_path: str, dst_path: str, key_hash: str = None) -> FileHeader:
+    def copy(self, src_path: str, dst_path: str, requester: str = "root", key_hash: str = None) -> FileHeader:
         """Copy file. New copy gets new blocks. Can use different key."""
         if not self.exists(src_path):
             raise FileNotFoundError(f"Source file not found for copy: {src_path}")
         
-        data = self.read(src_path, "root") # Privileged internal op
+        data = self.read(src_path, requester) # Require read access to copy
         src_header = self._read_header(src_path)
         
         new_key_hash = key_hash if key_hash is not None else src_header.key_hash
         
         return self.create(dst_path, data, mime_type=src_header.mime_type, key_hash=new_key_hash)
 
-    def hard_link(self, target: str, link_name: str) -> None:
+    def hard_link(self, target: str, link_name: str, requester: str = "root") -> None:
         """Create hard link (same blocks, new FAT entry)."""
         if not self.exists(target):
             raise FileNotFoundError(f"Target for hard link does not exist: {target}")
         if self.exists(link_name):
             raise FileExistsError(f"Link name already exists: {link_name}")
+
+        header = self._read_header(target)
+        # Enforce ACL: must be able to read target to hard link it
+        self._key_manager.get_key_for_read(header.key_hash, requester)
             
         header_address = self._fat.lookup(target)
         self._fat.register_file(link_name, header_address)

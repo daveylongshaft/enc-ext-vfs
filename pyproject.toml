@@ -16,3 +16,6 @@ dependencies = [
 test = [
     "pytest",
 ]
+
+[project.scripts]
+enc-ext-vfs-cli = "enc_ext_vfs.cli:main"

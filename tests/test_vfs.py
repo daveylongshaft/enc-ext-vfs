@@ -156,3 +156,50 @@ def test_soft_link(vfs):
     
     # Reading the link should give the target path
     assert vfs.read(link, "root") == target.encode('utf-8')
+
+def test_acl_enforcement_for_modifications(vfs):
+    """Test ACL enforcement for write, append, copy, rename, delete, hard_link."""
+    owner = "file_owner"
+    unauthorized_user = "hacker"
+    path = "/secure_mod.txt"
+
+    # Register a key for the owner
+    key_hash = vfs._key_manager.register_key(owner, "secure_mod_key")
+
+    # Create a file with that key
+    vfs.create(path, b"secret data", key_hash=key_hash)
+
+    # Unauthorized write
+    with pytest.raises(PermissionError):
+        vfs.write(path, b"hacked", requester=unauthorized_user)
+
+    # Unauthorized append
+    with pytest.raises(PermissionError):
+        vfs.append(path, b"hacked", requester=unauthorized_user)
+
+    # Unauthorized copy
+    with pytest.raises(PermissionError):
+        vfs.copy(path, "/hacker_copy.txt", requester=unauthorized_user)
+
+    # Unauthorized rename
+    with pytest.raises(PermissionError):
+        vfs.rename(path, "/hacked_rename.txt", requester=unauthorized_user)
+
+    # Unauthorized hard_link
+    with pytest.raises(PermissionError):
+        vfs.hard_link(path, "/hacked_hardlink.txt", requester=unauthorized_user)
+
+    # Unauthorized delete
+    with pytest.raises(PermissionError):
+        vfs.delete(path, requester=unauthorized_user)
+
+    # Authorized operations should succeed
+    vfs.write(path, b"new secret", requester=owner, key_hash=key_hash)
+    vfs.append(path, b" more", requester=owner)
+    vfs.copy(path, "/owner_copy.txt", requester=owner)
+    vfs.rename(path, "/owner_rename.txt", requester=owner)
+    vfs.hard_link("/owner_rename.txt", "/owner_hardlink.txt", requester=owner)
+    vfs.delete("/owner_rename.txt", requester=owner)
+
+    assert vfs.exists("/owner_copy.txt")
+    assert vfs.exists("/owner_hardlink.txt")
