@@ -1,86 +1,146 @@
+import logging
+
 import pytest
+from cryptography.exceptions import InvalidTag
+
 from enc_ext_vfs.block_store import BlockStore
+from enc_ext_vfs.key_manager import KeyManager
+
 
 @pytest.fixture
-def block_store(tmp_path):
-    """Fixture to create a BlockStore instance with a temporary root path."""
-    return BlockStore(str(tmp_path))
+def key_manager(tmp_path):
+    return KeyManager(str(tmp_path / "keys"))
 
-def test_allocate_block(block_store):
-    """Test block allocation creates the correct directory structure."""
-    address = block_store.allocate_block()
-    
-    assert isinstance(address, str)
-    assert len(address.split('-')) == 8
-    
-    path = block_store._get_path_from_address(address)
-    assert path.parent.exists()
-    assert path.parent.is_dir()
 
-def test_write_read_block(block_store):
-    """Test that data can be written to and read from a block."""
-    address = block_store.allocate_block()
-    data = b"some block data"
-    
-    block_store.write_block(address, data)
-    read_data = block_store.read_block(address)
-    
-    assert read_data == data
+@pytest.fixture
+def block_store(tmp_path, key_manager):
+    return BlockStore(str(tmp_path / "vfs"), key_manager=key_manager)
 
-def test_read_nonexistent_block(block_store):
-    """Test that reading a nonexistent block raises FileNotFoundError."""
-    address = "00-11-22-33-44-55-66-77"
-    with pytest.raises(FileNotFoundError):
-        block_store.read_block(address)
 
-def test_delete_block(block_store):
-    """Test that deleting a block removes the file and empty parent dirs."""
-    address = block_store.allocate_block()
-    path = block_store._get_path_from_address(address)
-    
-    block_store.write_block(address, b"data")
-    assert path.exists()
-    
-    block_store.delete_block(address)
-    assert not path.exists()
-    
-    # Check that parent directories are removed
-    assert not path.parent.exists()
-    assert not path.parent.parent.exists()
-    assert not path.parent.parent.parent.exists()
+def test_block_store_roundtrip_and_header_ops(block_store, key_manager):
+    key_hash = key_manager.register_key("owner", friendly_name="phase3")
+    block_id = block_store.allocate_block_id()
+    payload = b"phase3 data"
 
-def test_list_blocks(block_store):
-    """Test listing all allocated blocks."""
-    addresses = [block_store.allocate_block() for _ in range(5)]
-    for addr in addresses:
-        block_store.write_block(addr, b"data")
-        
-    listed_blocks = block_store.list_blocks()
-    
-    assert len(listed_blocks) == 5
-    assert sorted(addresses) == sorted(listed_blocks)
+    block_store.write_block(block_id, payload, key_hash)
+    assert block_store.read_block(block_id, key_hash) == payload
+    assert block_store.parity_path(block_id).exists()
 
-def test_delete_block_shared_parent(block_store):
-    """Test that deleting a block does not remove a parent dir if it's not empty."""
-    # Create two addresses that share the same parent directory
-    address1_parts = ["01", "02", "03"] + [f"{i:02x}" for i in range(5)]
-    address1 = "-".join(address1_parts)
-    path1 = block_store._get_path_from_address(address1)
-    path1.parent.mkdir(parents=True, exist_ok=True)
-    block_store.write_block(address1, b"data1")
+    header = {"inode_id": "inode-1", "block_id": block_id, "key_hash": key_hash, "size": len(payload)}
+    block_store.write_header(block_id, header)
+    assert block_store.read_header(block_id) == header
+    assert block_store.header_parity_path(block_id).exists()
 
-    address2_parts = ["01", "02", "03"] + [f"{i+5:02x}" for i in range(5)]
-    address2 = "-".join(address2_parts)
-    path2 = block_store._get_path_from_address(address2)
-    block_store.write_block(address2, b"data2")
-    
-    assert path1.parent == path2.parent
-    
-    # Delete one block
-    block_store.delete_block(address1)
-    
-    # The file should be gone, but the parent directory should remain
-    assert not path1.exists()
-    assert path2.exists()
-    assert path1.parent.exists()
-    assert path1.parent.is_dir()
+    wrong_key_hash = key_manager.register_key("intruder", friendly_name="wrong")
+    with pytest.raises(InvalidTag):
+        block_store.read_block(block_id, wrong_key_hash)
+
+    block_store.delete_block(block_id)
+    assert not block_store.block_path(block_id).exists()
+    assert not block_store.header_path(block_id).exists()
+    assert not block_store.parity_path(block_id).exists()
+    assert not block_store.header_parity_path(block_id).exists()
+
+
+def test_allocate_block_ids_are_unique(block_store):
+    block_ids = {block_store.allocate_block_id() for _ in range(20)}
+    assert len(block_ids) == 20
+
+
+def test_reed_solomon_recovery_handles_missing_and_corrupt_payloads(block_store, key_manager, caplog):
+    caplog.set_level(logging.WARNING)
+    key_hash = key_manager.register_key("owner", friendly_name="resilient")
+    block_id = block_store.allocate_block_id()
+    payload = b"recover me from corruption"
+
+    block_store.write_block(block_id, payload, key_hash)
+    block_path = block_store.block_path(block_id)
+
+    block_path.unlink()
+    assert block_store.read_block(block_id, key_hash) == payload
+    assert "Recovering" in caplog.text
+
+    block_path.write_bytes(b"totally broken ciphertext")
+    assert block_store.read_block(block_id, key_hash) == payload
+    assert "payload checksum does not match parity packet" in caplog.text
+
+
+def test_corrupt_header_is_recovered_from_header_parity(block_store, key_manager, caplog):
+    caplog.set_level(logging.WARNING)
+    block_id = block_store.allocate_block_id()
+    header = {"inode_id": "inode-2", "block_id": block_id, "key_hash": key_manager.get_default_key_hash(), "size": 1}
+
+    block_store.write_header(block_id, header)
+    header_path = block_store.header_path(block_id)
+    header_path.write_bytes(b"corrupt header bytes")
+
+    assert block_store.read_header(block_id) == header
+    assert "Recovering" in caplog.text
+
+
+def test_reed_solomon_parity_tolerates_multiple_corrupt_shards(block_store, key_manager):
+    key_hash = key_manager.register_key("owner", friendly_name="multi-block")
+    block_id = block_store.allocate_block_id()
+    payload = b"multi shard recovery works" * 8
+
+    block_store.write_block(block_id, payload, key_hash)
+    parity_path = block_store.parity_path(block_id)
+    parity_bytes = bytearray(parity_path.read_bytes())
+    packet = block_store.parity_recovery.inspect_parity_data(bytes(parity_bytes), block_id)
+    block_id_size = len(block_id.encode("utf-8"))
+    shard_group_size = block_store.parity_recovery._CHECKSUM_SIZE + packet["shard_size"]
+    shard_base_offset = (
+        block_store.parity_recovery._PACKET_HEADER.size
+        + block_id_size
+        + block_store.parity_recovery._CHECKSUM_SIZE
+    )
+    for shard_index in (0, 4):
+        shard_offset = shard_base_offset + (shard_index * shard_group_size) + block_store.parity_recovery._CHECKSUM_SIZE
+        parity_bytes[shard_offset] ^= 0xFF
+    parity_path.write_bytes(parity_bytes)
+
+    block_store.block_path(block_id).unlink()
+    assert block_store.read_block(block_id, key_hash) == payload
+
+
+def test_corrupt_parity_packet_is_rebuilt_from_valid_payload(block_store, key_manager, caplog):
+    caplog.set_level(logging.WARNING)
+    key_hash = key_manager.register_key("owner", friendly_name="valid-payload")
+    block_id = block_store.allocate_block_id()
+    payload = b"payload remains readable"
+
+    block_store.write_block(block_id, payload, key_hash)
+    parity_path = block_store.parity_path(block_id)
+    parity_path.write_text("not json at all")
+
+    assert block_store.read_block(block_id, key_hash) == payload
+    assert "Rebuilt parity" in caplog.text
+
+    block_store.block_path(block_id).unlink()
+    assert block_store.read_block(block_id, key_hash) == payload
+
+
+def test_missing_parity_sidecar_is_rebuilt_from_valid_payload(block_store, key_manager, caplog):
+    caplog.set_level(logging.WARNING)
+    key_hash = key_manager.register_key("owner", friendly_name="missing-parity")
+    block_id = block_store.allocate_block_id()
+
+    block_store.write_block(block_id, b"secret data", key_hash)
+    block_store.parity_path(block_id).unlink()
+
+    assert block_store.read_block(block_id, key_hash) == b"secret data"
+    assert block_store.parity_path(block_id).exists()
+    assert "parity sidecar is missing" in caplog.text
+
+
+def test_wrong_key_does_not_trigger_recovery_when_payload_is_valid(block_store, key_manager, caplog):
+    caplog.set_level(logging.WARNING)
+    owner_key_hash = key_manager.register_key("owner", friendly_name="owner-key")
+    wrong_key_hash = key_manager.register_key("guest", friendly_name="guest-key")
+    block_id = block_store.allocate_block_id()
+
+    block_store.write_block(block_id, b"secret", owner_key_hash)
+    with pytest.raises(InvalidTag):
+        block_store.read_block(block_id, wrong_key_hash)
+    assert "Decrypt failed" in caplog.text
+    assert "attempting parity recovery" not in caplog.text

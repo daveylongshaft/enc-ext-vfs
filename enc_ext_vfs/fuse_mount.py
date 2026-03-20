@@ -11,6 +11,7 @@ except ImportError:
         pass
     fuse.Operations = Operations
 
+from .requester import resolve_requester
 from .vfs import VirtualFileSystem
 
 class EncExtVfsFuse(fuse.Operations):
@@ -125,7 +126,7 @@ def main():
     parser = argparse.ArgumentParser(description="Mount the Encrypted FUSE VFS.")
     parser.add_argument("storage_root", help="The root directory for the block store.")
     parser.add_argument("mount_point", help="The directory where the VFS will be mounted.")
-    parser.add_argument("--requester", default="root", help="The user identity for FUSE operations.")
+    parser.add_argument("--requester", default=resolve_requester(), help="The user identity for FUSE operations.")
     args = parser.parse_args()
 
     vfs = VirtualFileSystem(args.storage_root)

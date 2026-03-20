@@ -1,26 +1,16 @@
-import pytest
-from enc_ext_vfs.vfs import VirtualFileSystem
+from enc_ext_vfs.fuse_layer import CSCFUSEAdapter
+from enc_ext_vfs.requester import resolve_requester
+from enc_ext_vfs.vfs import VFS
 
-@pytest.fixture
-def vfs(tmp_path):
-    return VirtualFileSystem(str(tmp_path))
 
-def test_empty_file(vfs):
-    path = "/empty.txt"
-    vfs.create(path, b"")
-    assert vfs.exists(path)
-    assert vfs.read(path, "root") == b""
+def test_requester_resolution_prefers_explicit_env(monkeypatch):
+    monkeypatch.setenv("ENC_EXT_VFS_REQUESTER", "oper")
+    monkeypatch.setenv("USER", "ignored-user")
+    assert resolve_requester() == "oper"
 
-def test_file_not_found(vfs):
-    with pytest.raises(FileNotFoundError):
-        vfs.read("/nonexistent.txt", "root")
 
-def test_delete_nonexistent(vfs):
-    with pytest.raises(FileNotFoundError):
-        vfs.delete("/nonexistent.txt")
-
-def test_create_existing(vfs):
-    path = "/exists.txt"
-    vfs.create(path, b"data")
-    with pytest.raises(FileExistsError):
-        vfs.create(path, b"more data")
+def test_fuse_adapter_defaults_requester_from_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("ENC_EXT_VFS_REQUESTER_NICK", "bob")
+    vfs = VFS(str(tmp_path / "vfs"))
+    adapter = CSCFUSEAdapter(vfs)
+    assert adapter.requester == "bob"

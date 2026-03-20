@@ -17,5 +17,10 @@ test = [
     "pytest",
 ]
 
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [project.scripts]
-enc-ext-vfs-cli = "enc_ext_vfs.cli:main"
+enc-ext-vfs-bench = "enc_ext_vfs.benchmarks:main"
+enc-ext-vfs-fsck = "enc_ext_vfs.fsck:main"

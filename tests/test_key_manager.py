@@ -112,3 +112,27 @@ def test_authorization_by_non_owner_fails(km):
         
     with pytest.raises(PermissionError):
         km.revoke_user(key_hash, imposter, user)
+
+
+def test_save_key_metadata_is_atomic_on_write_failure(km, tmp_path, monkeypatch):
+    key_hash = km.register_key("owner", friendly_name="stable")
+    original_content = km.key_metadata_path.read_text(encoding="utf-8")
+
+    def partial_dump(payload, handle, **kwargs):
+        handle.write('{"broken"')
+        handle.flush()
+        raise RuntimeError("simulated crash during key metadata save")
+
+    monkeypatch.setattr("enc_ext_vfs.key_manager.json.dump", partial_dump)
+    km._keys["new-key"] = {"owner": "owner", "name": "new", "description": ""}
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        km._save_key_metadata()
+
+    assert km.key_metadata_path.read_text(encoding="utf-8") == original_content
+    assert not km.key_metadata_path.with_suffix(".json.tmp").exists()
+
+    reloaded = KeyManager(str(tmp_path))
+    reloaded_keys = {entry["hash"] for entry in reloaded.list_keys()}
+    assert key_hash in reloaded_keys
+    assert "new-key" not in reloaded_keys
